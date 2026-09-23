@@ -6,23 +6,27 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build-apk.yml'
-      - 'Serven-Source.zip'
+      - 'Serven-0.2.0-Source.zip'
 
 permissions:
   contents: read
 
+concurrency:
+  group: serven-development-build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - name: Verify and extract the prepared source
         shell: bash
         run: |
-          echo '0774294dd2dd6cc47ddb85fd6258198d73f8c1d847ac40e9fafe163cad594086  Serven-Source.zip' | sha256sum --check
-          unzip -q Serven-Source.zip -d source
+          echo 'e1551d95eecb93e62682504cac27db10ad140d09b7923de3c17a294ef64a2068  Serven-0.2.0-Source.zip' | sha256sum --check
+          unzip -q Serven-0.2.0-Source.zip -d source
 
       - uses: actions/setup-java@v4
         with:
@@ -31,13 +35,13 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.6'
+          gradle-version: '8.13'
 
       - name: Prepare Android tools
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
         with:
           cmdline-tools-version: '12266719'
-          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+          packages: 'platform-tools platforms;android-34 build-tools;35.0.0'
           log-accepted-android-sdk-licenses: false
 
       - name: Compile Serven
@@ -45,37 +49,56 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --max-workers=2 --console=plain :app:assembleDebug 2>&1 | tee ../../build.log
+          gradle --no-daemon --max-workers=2 --console=plain :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest 2>&1 | tee ../../build.log
 
       - name: Verify the APK and include matching source
         shell: bash
         run: |
           mkdir -p outputs
-          cp source/Serven-Source/app/build/outputs/apk/debug/app-debug.apk outputs/Serven-0.1.0-debug.apk
-          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose outputs/Serven-0.1.0-debug.apk | tee outputs/signature-check.txt
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging outputs/Serven-0.1.0-debug.apk > outputs/apk-info.txt
+          cp source/Serven-Source/app/build/outputs/apk/debug/app-debug.apk outputs/Serven-0.2.0-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose outputs/Serven-0.2.0-debug.apk | tee outputs/signature-check.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging outputs/Serven-0.2.0-debug.apk > outputs/apk-info.txt
           python3 - <<'PY'
           import re
           from pathlib import Path
           info = Path('outputs/apk-info.txt').read_text()
           package = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", info, re.M)
-          if package is None or package.groups() != ('app.serven.music', '1', '0.1.0'):
+          if package is None or package.groups() != ('app.serven.music', '2', '0.2.0'):
               raise SystemExit('Unexpected APK identity or version')
           if "application-label:'Serven'" not in info or "sdkVersion:'26'" not in info:
               raise SystemExit('Unexpected app label or minimum Android SDK')
           print('Verified APK identity, version, launcher name, and minimum Android SDK')
           PY
-          cp Serven-Source.zip outputs/
+          cp -r source/Serven-Source/app/build/test-results/testDebugUnitTest outputs/unit-test-results
+          cp Serven-0.2.0-Source.zip outputs/
           cp source/Serven-Source/SERVEN_BUILD_INFO.json outputs/
           cp source/Serven-Source/SOURCE_PROVENANCE.json outputs/
-          (cd outputs && sha256sum Serven-0.1.0-debug.apk Serven-Source.zip > SHA256SUMS.txt)
+          (cd outputs && sha256sum Serven-0.2.0-debug.apk Serven-0.2.0-Source.zip > SHA256SUMS.txt)
+
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Check offline and background playback on Android 14
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash source/Serven-Source/tools/run_android_smoke.sh
 
       - name: Save the APK and matching source
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Serven-APK-and-source
+          name: Serven-0.2.0-APK-and-source
           path: outputs/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 30
 
       - name: Save build diagnostics
